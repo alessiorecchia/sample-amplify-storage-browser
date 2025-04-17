@@ -29,7 +29,7 @@ import {
   IAMClient,
   ListRolesCommand
 } from "@aws-sdk/client-iam";
-import { log } from 'console';
+// import { log } from 'console';
 
 ConsoleLogger.LOG_LEVEL = 'VERBOSE';
 
