@@ -1,81 +1,100 @@
 import { defineBackend } from "@aws-amplify/backend";
 import { auth } from "./auth/resource";
 import { Policy, PolicyStatement, Effect } from "aws-cdk-lib/aws-iam";
+import { 
+  CloudFormationClient,
+  ListStackResourcesCommand,
+} from "@aws-sdk/client-cloudformation";
+import {
+  S3Client,
+  ListObjectsCommand
+} from "@aws-sdk/client-s3"
+import { ConsoleLogger } from 'aws-amplify/utils';
+
+ConsoleLogger.LOG_LEVEL = 'VERBOSE';
+
+const logger = new ConsoleLogger('foo');
 
 /**
  * @see https://docs.amplify.aws/react/build-a-backend/ to add storage, functions, and more
  */
+
+const cfClient = new CloudFormationClient({ region: "eu-west-1", });
+const cfInput = {
+  StackName: "IdwWeatherCommonResources",
+}
+const s3Client = new S3Client({});
+
+const cfCommand = new ListStackResourcesCommand(cfInput);
+const response = await cfClient.send(cfCommand)
+
+// logger.info(response.StackResourceSummaries)
+// logger.info('Next Token', response.NextToken);
+
+const cfBody = JSON.stringify(response.StackResourceSummaries);
+const cfBodyJson = JSON.parse(cfBody);
+var bucket = '';
+cfBodyJson.forEach((element: { [x: string]: any; }) => {
+  if (element['LogicalResourceId'] === 'SourceDataFilesBucket') {
+    // logger.info('########### Bucket: ', element['PhysicalResourceId']);
+    bucket = element['PhysicalResourceId'];
+  }
+});
+
+const customBucketName = bucket;
+
+const s3Input = {
+  Bucket: bucket,
+  Delimiter: "/",
+}
+const s3Command = new ListObjectsCommand(s3Input);
+const s3Response = await s3Client.send(s3Command);
+
+// logger.info('########### Bucket elements: ', s3Response.CommonPrefixes);
+const s3Body = JSON.stringify(s3Response.CommonPrefixes);
+const s3JsonBody = JSON.parse(s3Body);
+
+interface Paths {
+  [folder: string]: object;
+}
+var paths: Paths = {};
+var authPolicyResources: string[] = [];
+var stringLikeConditions: { [string: string]: string[]};
+stringLikeConditions = {};
+stringLikeConditions['s3:prefix'] = [];
+
+
+s3JsonBody.forEach((element: { [x: string]: any; }) => {
+  var folder = element['Prefix'] + '*';
+  paths[folder] = {
+    authenticated: ['get', 'list']
+  };
+  authPolicyResources.push(`arn:aws:s3:::${customBucketName}/${folder}`);
+  stringLikeConditions['s3:prefix'].push(element['Prefix']);
+  stringLikeConditions['s3:prefix'].push(folder);
+});
+
+// logger.info('########## Paths: ', paths)
+// logger.info('############### String Like:', stringLikeConditions);
+// logger.info('############### Auth policies:', authPolicyResources);
+// logger.info('################## AUTH: ', auth)
 const backend = defineBackend({
   auth,
 });
 
-/**
- * Note: This code assumes the existence of an S3 bucket named 'my-existing-bucket'.
- * Replace 'my-existing-bucket' with your actual bucket name and adjust the paths and permissions as needed.
- * For more information on authorization access, visit: https://docs.amplify.aws/react/build-a-backend/storage/authorization/#available-actions
- *
- * Requirements for this sample:
- * 1. An S3 bucket named 'my-existing-bucket' must exist in your AWS account.
- * 2. The bucket should contain two folders:
- *    - 'public/' - Accessible by all authenticated and unauthenticated users.
- *    - 'admin/' - Accessible only by users in the admin group and authenticated users.
- *
- * Note: Ensure the bucket exists before deploying this code, as it only sets up IAM policies and does not create the S3 bucket.
- */
-const customBucketName = "dantest-logs";
-
 backend.addOutput({
-  version: "1.3",
   storage: {
-    aws_region: "eu-west-1",
+    aws_region: 'eu-west-1',
     bucket_name: customBucketName,
     buckets: [
       {
-        name: customBucketName,
+        name: 'Wheater data archive',
         bucket_name: customBucketName,
-        aws_region: "eu-west-1",
-        //@ts-expect-error amplify backend type issue https://github.com/aws-amplify/amplify-backend/issues/2569
-        paths: {
-          "athena/*": {
-            guest: ["get", "list"],
-            authenticated: ["get", "list", "write", "delete"],
-          },
-          "dan/*": {
-            groupsadmin: ["get", "list", "write", "delete"],
-            authenticated: ["get", "list", "write", "delete"],
-          },
-          "exportedlogs/*": {
-            groupsadmin: ["get", "list", "write", "delete"],
-            authenticated: ["get", "list", "write", "delete"],
-          },
-        },
-      },
-    ],
-  },
-});
-
-/**
- * Define an inline policy to attach to Amplify's un-auth role
- * This policy defines how unauthenticated users can access your existing bucket
- */
-const unauthPolicy = new Policy(backend.stack, "customBucketUnauthPolicy", {
-  statements: [
-    new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["s3:GetObject"],
-      resources: [`arn:aws:s3:::${customBucketName}/athena/*`],
-    }),
-    new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["s3:ListBucket"],
-      resources: [`arn:aws:s3:::${customBucketName}`],
-      conditions: {
-        StringLike: {
-          "s3:prefix": ["athena/*", "athena/"],
-        },
-      },
-    }),
-  ],
+        aws_region: 'eu-west-1',
+        paths: paths
+      }
+    ]
+  }
 });
 
 /**
@@ -86,12 +105,8 @@ const authPolicy = new Policy(backend.stack, "customBucketAuthPolicy", {
   statements: [
     new PolicyStatement({
       effect: Effect.ALLOW,
-      actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      resources: [
-        `arn:aws:s3:::${customBucketName}/athena/*`,
-        `arn:aws:s3:::${customBucketName}/dan/*`,
-        `arn:aws:s3:::${customBucketName}/exportedlogs/*`,
-      ],
+      actions: ["s3:GetObject", "s3:ListObject"],
+      resources: authPolicyResources,
     }),
     new PolicyStatement({
       effect: Effect.ALLOW,
@@ -101,48 +116,13 @@ const authPolicy = new Policy(backend.stack, "customBucketAuthPolicy", {
         `arn:aws:s3:::${customBucketName}/*`,
       ],
       conditions: {
-        StringLike: {
-          "s3:prefix": ["athena/*", "athena/", "dan/*", "dan/", "exportedlogs/*", "exportedlogs/",],
-        },
+        StringLike: stringLikeConditions
       },
     }),
   ],
 });
 
-/**
- * Define an inline policy to attach to Admin user role
- * This policy defines how authenticated users can access your existing bucket
- */
-const adminPolicy = new Policy(backend.stack, "customBucketAdminPolicy", {
-  statements: [
-    new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      resources: [`arn:aws:s3:::${customBucketName}/dan/*`],
-    }),
-    new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["s3:ListBucket"],
-      resources: [
-        `arn:aws:s3:::${customBucketName}`,
-        `arn:aws:s3:::${customBucketName}/*`,
-      ],
-      conditions: {
-        StringLike: {
-          "s3:prefix": ["dan/*", "dan/"],
-        },
-      },
-    }),
-  ],
-});
-
-// Add the policies to the unauthenticated user role
-backend.auth.resources.unauthenticatedUserIamRole.attachInlinePolicy(
-  unauthPolicy
-);
+// logger.info("############### IAM ROLE: ", backend.auth.resources.authenticatedUserIamRole.roleArn)
 
 // Add the policies to the authenticated user role
 backend.auth.resources.authenticatedUserIamRole.attachInlinePolicy(authPolicy);
-
-// Add the policies to the admin user role
-backend.auth.resources.groups["admin"].role.attachInlinePolicy(adminPolicy);
